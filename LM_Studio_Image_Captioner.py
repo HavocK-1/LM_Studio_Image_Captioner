@@ -7,6 +7,7 @@ import json
 import base64
 import re
 import requests
+import time
 
 # --- CONSTANTS ---
 if getattr(sys, 'frozen', False):
@@ -311,8 +312,23 @@ class CaptionApp:
     # --- STRIP THINKING TAGS ---
     @staticmethod
     def strip_thinking(text):
-        """Remove <think>...</think> blocks from thinking-model output."""
-        return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        """Remove  blocks from thinking-model output."""
+        return re.sub(r'', '', text, flags=re.DOTALL).strip()
+
+    # --- TIME FORMATTING HELPER ---
+    @staticmethod
+    def format_duration(seconds):
+        """Format a duration in seconds to a human-readable string."""
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds // 3600)
+            minutes = int((seconds % 3600) // 60)
+            return f"{hours}h {minutes}m"
 
     # --- PROCESSING LOGIC ---
     def start_thread(self):
@@ -343,8 +359,11 @@ class CaptionApp:
         thread.start()
 
     def process_images(self, server_url, folder_path, sys_instruction, prompt_text):
+        import time as time_module
         self.log("--- Starting Process ---")
         self.log(f"Server: {server_url}")
+
+        start_time_batch = time_module.time()
 
         # Verify server is reachable
         try:
@@ -375,9 +394,11 @@ class CaptionApp:
 
         self.log(f"Found {len(image_files)} image(s).")
         processed_count = 0
+        skipped_count = 0
         endpoint = f"{server_url}/chat/completions"
+        times_per_image = []
 
-        for filename in image_files:
+        for idx, filename in enumerate(image_files):
             if not self.is_running:
                 break
 
@@ -387,10 +408,13 @@ class CaptionApp:
 
             if os.path.exists(caption_path):
                 self.log(f"Skipping '{filename}' (caption exists).")
+                skipped_count += 1
                 continue
 
             try:
                 self.log(f"Processing '{filename}'...")
+                img_start = time_module.time()
+
                 img_b64, mime_type = self.encode_image_base64(image_path)
 
                 # Build messages
@@ -426,6 +450,9 @@ class CaptionApp:
                 raw_text = result['choices'][0]['message']['content']
                 caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
 
+                img_elapsed = time_module.time() - img_start
+                times_per_image.append(img_elapsed)
+
                 if not caption:
                     self.log(f"Warning: Empty caption for '{filename}', skipping.")
                     continue
@@ -433,13 +460,23 @@ class CaptionApp:
                 with open(caption_path, 'w', encoding='utf-8') as f:
                     f.write(caption)
 
-                self.log(f"Done: '{filename}'")
+                self.log(f"Done: '{filename}' (took {self.format_duration(img_elapsed)})")
+
+                # Estimate remaining time
+                remaining = len(image_files) - (idx + 1)
+                if times_per_image:
+                    avg_time = sum(times_per_image) / len(times_per_image)
+                    eta = avg_time * remaining
+                    self.log(f"  ~{remaining} image(s) left • Est. remaining: {self.format_duration(eta)}")
+
                 processed_count += 1
 
             except Exception as e:
                 self.log(f"Error on '{filename}': {e}")
 
-        self.log(f"\nFinished! Total processed: {processed_count}")
+        batch_elapsed = time_module.time() - start_time_batch
+        total_handled = processed_count + skipped_count
+        self.log(f"\nFinished! Total processed: {processed_count} | Skipped: {skipped_count} | Batch time: {self.format_duration(batch_elapsed)}")
         self.reset_ui()
 
     def stop_processing(self):
