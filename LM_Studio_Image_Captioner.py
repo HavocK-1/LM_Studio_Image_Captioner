@@ -71,12 +71,26 @@ class CaptionApp:
 
         self.theme_frame = theme_frame
 
-        # 1. LM STUDIO SERVER URL
-        lbl_url = tk.Label(main_frame, text="LM Studio Server URL", font=("Arial", 10, "bold"), anchor="w")
+        # 1. SERVER URL
+        lbl_url = tk.Label(main_frame, text="Server URL (OpenAI Compatible)", font=("Arial", 10, "bold"), anchor="w")
         lbl_url.pack(fill=tk.X, pady=(0, 2))
 
         self.entry_url = tk.Entry(main_frame, font=("Consolas", 9))
         self.entry_url.pack(fill=tk.X, pady=5)
+
+        # 1b. API KEY
+        lbl_api_key = tk.Label(main_frame, text="API Key (optional, for endpoints requiring auth)", font=("Arial", 10, "bold"), anchor="w")
+        lbl_api_key.pack(fill=tk.X, pady=(10, 2))
+
+        self.entry_api_key = tk.Entry(main_frame, font=("Consolas", 9), show="*")
+        self.entry_api_key.pack(fill=tk.X, pady=5)
+
+        # 1c. MODEL NAME
+        lbl_model = tk.Label(main_frame, text="Model Name (leave blank for LM Studio auto-detect)", font=("Arial", 10, "bold"), anchor="w")
+        lbl_model.pack(fill=tk.X, pady=(10, 2))
+
+        self.entry_model = tk.Entry(main_frame, font=("Consolas", 9))
+        self.entry_model.pack(fill=tk.X, pady=5)
 
         # 2. FOLDER PATH
         lbl_path = tk.Label(main_frame, text="Path to Folder Containing Images", font=("Arial", 10, "bold"), anchor="w")
@@ -155,8 +169,8 @@ class CaptionApp:
         self.current_theme = "light"
 
         # Track all themed widgets
-        self.labels = [lbl_url, lbl_path, lbl_sys_instr, lbl_prompt, lbl_log]
-        self.entries = [self.entry_url, self.entry_path]
+        self.labels = [lbl_url, lbl_path, lbl_sys_instr, lbl_prompt, lbl_log, lbl_api_key, lbl_model]
+        self.entries = [self.entry_url, self.entry_path, self.entry_api_key, self.entry_model]
         self.text_widgets = [self.txt_sys_instruction, self.txt_prompt]
         self.buttons = [btn_browse, btn_clear_sys, btn_save_sys, btn_clear_prompt, btn_save_prompt, btn_clear_log, self.btn_dark, self.btn_light]
         self.frames = [main_frame, path_frame, sys_btn_frame, prompt_btn_frame, theme_frame, log_header]
@@ -240,6 +254,12 @@ class CaptionApp:
                 self.entry_url.delete(0, tk.END)
                 self.entry_url.insert(0, data.get('server_url', LMSTUDIO_DEFAULT_URL))
 
+                self.entry_api_key.delete(0, tk.END)
+                self.entry_api_key.insert(0, data.get('api_key', ''))
+
+                self.entry_model.delete(0, tk.END)
+                self.entry_model.insert(0, data.get('model_name', ''))
+
                 self.entry_path.delete(0, tk.END)
                 self.entry_path.insert(0, data.get('folder_path', ''))
 
@@ -264,7 +284,7 @@ class CaptionApp:
         self.entry_url.delete(0, tk.END)
         self.entry_url.insert(0, LMSTUDIO_DEFAULT_URL)
 
-    def save_config(self, server_url, folder_path, sys_instruction, prompt):
+    def save_config(self, server_url, api_key, model_name, folder_path, sys_instruction, prompt):
         """Saves current UI settings to JSON, preserving theme."""
         data = {}
         if os.path.exists(CONFIG_FILE):
@@ -275,6 +295,8 @@ class CaptionApp:
                 pass
         data.update({
             "server_url": server_url,
+            "api_key": api_key,
+            "model_name": model_name,
             "folder_path": folder_path,
             "system_instruction": sys_instruction,
             "prompt": prompt
@@ -288,10 +310,12 @@ class CaptionApp:
     def save_prompts(self):
         """Save current prompts and settings to config."""
         server_url = self.entry_url.get().strip() or LMSTUDIO_DEFAULT_URL
+        api_key = self.entry_api_key.get().strip()
+        model_name = self.entry_model.get().strip()
         folder_path = self.entry_path.get().strip()
         sys_instruction = self.txt_sys_instruction.get("1.0", tk.END).strip()
         prompt = self.txt_prompt.get("1.0", tk.END).strip()
-        self.save_config(server_url, folder_path, sys_instruction, prompt)
+        self.save_config(server_url, api_key, model_name, folder_path, sys_instruction, prompt)
         self.log("Prompts saved.")
 
     # --- IMAGE ENCODING ---
@@ -336,6 +360,8 @@ class CaptionApp:
             return
 
         server_url = self.entry_url.get().strip() or LMSTUDIO_DEFAULT_URL
+        api_key = self.entry_api_key.get().strip()
+        model_name = self.entry_model.get().strip()
         folder_path = self.entry_path.get().strip()
         sys_instruction = self.txt_sys_instruction.get("1.0", tk.END).strip()
         prompt_text = self.txt_prompt.get("1.0", tk.END).strip()
@@ -345,7 +371,7 @@ class CaptionApp:
             return
 
         # Save config before starting
-        self.save_config(server_url, folder_path, sys_instruction, prompt_text)
+        self.save_config(server_url, api_key, model_name, folder_path, sys_instruction, prompt_text)
 
         self.is_running = True
         self.btn_start.config(state='disabled', text="Processing...")
@@ -353,29 +379,39 @@ class CaptionApp:
 
         thread = threading.Thread(
             target=self.process_images,
-            args=(server_url, folder_path, sys_instruction, prompt_text)
+            args=(server_url, api_key, model_name, folder_path, sys_instruction, prompt_text)
         )
         thread.daemon = True
         thread.start()
 
-    def process_images(self, server_url, folder_path, sys_instruction, prompt_text):
+    def process_images(self, server_url, api_key, model_name, folder_path, sys_instruction, prompt_text):
         import time as time_module
         self.log("--- Starting Process ---")
         self.log(f"Server: {server_url}")
 
         start_time_batch = time_module.time()
 
-        # Verify server is reachable
-        try:
-            r = requests.get(f"{server_url}/models", timeout=5)
-            r.raise_for_status()
-            models_data = r.json()
-            model_id = models_data['data'][0]['id'] if models_data.get('data') else "local-model"
-            self.log(f"Connected. Model: {model_id}")
-        except Exception as e:
-            self.log(f"Cannot reach LM Studio server: {e}")
-            self.reset_ui()
-            return
+        # Determine model_id and set up auth headers
+        headers = {"Content-Type": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        if model_name:
+            model_id = model_name
+            self.log(f"Using explicitly set model: {model_id}")
+        else:
+            # Auto-detect from the server's /models endpoint (LM Studio style)
+            try:
+                r = requests.get(f"{server_url}/models", headers=headers, timeout=5)
+                r.raise_for_status()
+                models_data = r.json()
+                model_id = models_data['data'][0]['id'] if models_data.get('data') else "local-model"
+                self.log(f"Connected. Model: {model_id}")
+            except Exception as e:
+                self.log(f"Cannot reach server or auto-detect model: {e}")
+                self.log("Tip: Set the model name manually if this is an OpenAI-compatible endpoint.")
+                self.reset_ui()
+                return
 
         # Get images
         try:
@@ -443,7 +479,7 @@ class CaptionApp:
                     "messages": messages,
                 }
 
-                resp = requests.post(endpoint, json=payload, timeout=None)
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=None)
                 resp.raise_for_status()
                 result = resp.json()
 
