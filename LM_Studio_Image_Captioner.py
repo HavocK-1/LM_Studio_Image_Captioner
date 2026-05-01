@@ -8,6 +8,10 @@ import base64
 import re
 import requests
 import time
+try:
+    from PIL import Image
+except ImportError:
+    Image = None
 
 # --- CONSTANTS ---
 if getattr(sys, 'frozen', False):
@@ -17,6 +21,7 @@ else:
 CONFIG_FILE = os.path.join(_APP_DIR, "caption_config.json")
 LMSTUDIO_DEFAULT_URL = "http://localhost:1234/v1"
 SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp')
+MAX_IMAGE_DIMENSION = 1024
 
 # --- THEMES ---
 THEME_DARK = {
@@ -91,6 +96,19 @@ class CaptionApp:
 
         self.entry_model = tk.Entry(main_frame, font=("Consolas", 9))
         self.entry_model.pack(fill=tk.X, pady=5)
+
+        # 1d. DOWNSCALE CHECKBOX
+        if Image is not None:
+            self.var_downscale = tk.BooleanVar(value=True)
+            self.chk_downscale = tk.Checkbutton(
+                main_frame,
+                text=f"Downscale images to {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION} max (aspect ratio preserved)",
+                variable=self.var_downscale,
+                anchor="w"
+            )
+            self.chk_downscale.pack(fill=tk.X, pady=(5, 0))
+        else:
+            self.var_downscale = None
 
         # 2. FOLDER PATH
         lbl_path = tk.Label(main_frame, text="Path to Folder Containing Images", font=("Arial", 10, "bold"), anchor="w")
@@ -173,6 +191,8 @@ class CaptionApp:
         self.entries = [self.entry_url, self.entry_path, self.entry_api_key, self.entry_model]
         self.text_widgets = [self.txt_sys_instruction, self.txt_prompt]
         self.buttons = [btn_browse, btn_clear_sys, btn_save_sys, btn_clear_prompt, btn_save_prompt, btn_clear_log, self.btn_dark, self.btn_light]
+        if Image is not None:
+            self.buttons.append(self.chk_downscale)
         self.frames = [main_frame, path_frame, sys_btn_frame, prompt_btn_frame, theme_frame, log_header]
 
         # --- LOAD CONFIG ON STARTUP ---
@@ -333,6 +353,24 @@ class CaptionApp:
         with open(image_path, 'rb') as f:
             return base64.b64encode(f.read()).decode('utf-8'), mime_type
 
+    @staticmethod
+    def resize_image(image_path, max_dim):
+        if Image is None:
+            return image_path
+        img = Image.open(image_path).convert("RGB")
+        w, h = img.size
+        if w <= max_dim and h <= max_dim:
+            return image_path
+
+        scale = max_dim / max(w, h)
+        new_size = (int(w * scale), int(h * scale))
+        img = img.resize(new_size, Image.LANCZOS)
+
+        base, ext = os.path.splitext(image_path)
+        resized_path = f"{base}_resized_{new_size[0]}x{new_size[1]}{ext}"
+        img.save(resized_path)
+        return resized_path
+
     # --- STRIP THINKING TAGS ---
     @staticmethod
     def strip_thinking(text):
@@ -451,7 +489,14 @@ class CaptionApp:
                 self.log(f"Processing '{filename}'...")
                 img_start = time_module.time()
 
-                img_b64, mime_type = self.encode_image_base64(image_path)
+                work_path = image_path
+                if self.var_downscale is not None and self.var_downscale.get():
+                    resized = self.resize_image(image_path, MAX_IMAGE_DIMENSION)
+                    if resized != image_path:
+                        self.log(f"  Downscaled to fit {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}")
+                    work_path = resized
+
+                img_b64, mime_type = self.encode_image_base64(work_path)
 
                 # Build messages
                 messages = []
@@ -506,6 +551,13 @@ class CaptionApp:
                     self.log(f"  ~{remaining} image(s) left • Est. remaining: {self.format_duration(eta)}")
 
                 processed_count += 1
+
+                # Clean up temp resized file
+                if work_path != image_path:
+                    try:
+                        os.remove(work_path)
+                    except OSError:
+                        pass
 
             except Exception as e:
                 self.log(f"Error on '{filename}': {e}")
