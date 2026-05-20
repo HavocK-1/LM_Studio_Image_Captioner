@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import base64
 import re
 import requests
@@ -97,7 +98,21 @@ class CaptionApp:
         self.entry_model = tk.Entry(main_frame, font=("Consolas", 9))
         self.entry_model.pack(fill=tk.X, pady=5)
 
-        # 1d. DOWNSCALE CHECKBOX
+        # 1d. MAX CONCURRENT
+        lbl_concurrent = tk.Label(main_frame, text="Max Concurrent Predictions", font=("Arial", 10, "bold"), anchor="w")
+        lbl_concurrent.pack(fill=tk.X, pady=(10, 2))
+
+        concurrent_frame = tk.Frame(main_frame)
+        concurrent_frame.pack(fill=tk.X, pady=5)
+
+        self.var_concurrent = tk.IntVar(value=1)
+        self.spin_concurrent = tk.Spinbox(concurrent_frame, from_=1, to=32, textvariable=self.var_concurrent, width=10)
+        self.spin_concurrent.pack(side=tk.LEFT)
+
+        lbl_concurrent_hint = tk.Label(concurrent_frame, text="(1 = sequential, up to 32 for parallel)", font=("Arial", 8), fg="gray")
+        lbl_concurrent_hint.pack(side=tk.LEFT, padx=(10, 0))
+
+        # 1e. DOWNSCALE CHECKBOX
         if Image is not None:
             self.var_downscale = tk.BooleanVar(value=True)
             self.chk_downscale = tk.Checkbutton(
@@ -179,7 +194,7 @@ class CaptionApp:
         btn_clear_log = tk.Button(log_header, text="Clear Log", command=self.clear_log)
         btn_clear_log.pack(side=tk.RIGHT)
 
-        self.txt_log = scrolledtext.ScrolledText(main_frame, height=10, state='disabled', bg="#f0f0f0", font=("Consolas", 8))
+        self.txt_log = scrolledtext.ScrolledText(main_frame, height=30, state='disabled', bg="#f0f0f0", font=("Consolas", 8))
         self.txt_log.pack(fill=tk.BOTH, expand=True)
 
         # State
@@ -187,13 +202,13 @@ class CaptionApp:
         self.current_theme = "light"
 
         # Track all themed widgets
-        self.labels = [lbl_url, lbl_path, lbl_sys_instr, lbl_prompt, lbl_log, lbl_api_key, lbl_model]
+        self.labels = [lbl_url, lbl_path, lbl_sys_instr, lbl_prompt, lbl_log, lbl_api_key, lbl_model, lbl_concurrent]
         self.entries = [self.entry_url, self.entry_path, self.entry_api_key, self.entry_model]
         self.text_widgets = [self.txt_sys_instruction, self.txt_prompt]
-        self.buttons = [btn_browse, btn_clear_sys, btn_save_sys, btn_clear_prompt, btn_save_prompt, btn_clear_log, self.btn_dark, self.btn_light]
+        self.buttons = [btn_browse, btn_clear_sys, btn_save_sys, btn_clear_prompt, btn_save_prompt, btn_clear_log, self.btn_dark, self.btn_light, self.spin_concurrent]
         if Image is not None:
             self.buttons.append(self.chk_downscale)
-        self.frames = [main_frame, path_frame, sys_btn_frame, prompt_btn_frame, theme_frame, log_header]
+        self.frames = [main_frame, path_frame, sys_btn_frame, prompt_btn_frame, theme_frame, log_header, concurrent_frame]
 
         # --- LOAD CONFIG ON STARTUP ---
         self.load_config()
@@ -280,6 +295,9 @@ class CaptionApp:
                 self.entry_model.delete(0, tk.END)
                 self.entry_model.insert(0, data.get('model_name', ''))
 
+                max_concurrent = data.get('max_concurrent', 1)
+                self.var_concurrent.set(max(1, min(max_concurrent, 32)))
+
                 self.entry_path.delete(0, tk.END)
                 self.entry_path.insert(0, data.get('folder_path', ''))
 
@@ -319,7 +337,8 @@ class CaptionApp:
             "model_name": model_name,
             "folder_path": folder_path,
             "system_instruction": sys_instruction,
-            "prompt": prompt
+            "prompt": prompt,
+            "max_concurrent": self.var_concurrent.get()
         })
         try:
             with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -417,19 +436,19 @@ class CaptionApp:
 
         thread = threading.Thread(
             target=self.process_images,
-            args=(server_url, api_key, model_name, folder_path, sys_instruction, prompt_text)
+            args=(server_url, api_key, model_name, folder_path, sys_instruction, prompt_text, self.var_concurrent.get())
         )
         thread.daemon = True
         thread.start()
 
-    def process_images(self, server_url, api_key, model_name, folder_path, sys_instruction, prompt_text):
+    def process_images(self, server_url, api_key, model_name, folder_path, sys_instruction, prompt_text, max_concurrent):
         import time as time_module
         self.log("--- Starting Process ---")
         self.log(f"Server: {server_url}")
+        self.log(f"Concurrency: {max_concurrent}")
 
         start_time_batch = time_module.time()
 
-        # Determine model_id and set up auth headers
         headers = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -438,7 +457,6 @@ class CaptionApp:
             model_id = model_name
             self.log(f"Using explicitly set model: {model_id}")
         else:
-            # Auto-detect from the server's /models endpoint (LM Studio style)
             try:
                 r = requests.get(f"{server_url}/models", headers=headers, timeout=5)
                 r.raise_for_status()
@@ -451,7 +469,6 @@ class CaptionApp:
                 self.reset_ui()
                 return
 
-        # Get images
         try:
             image_files = sorted(
                 f for f in os.listdir(folder_path) if f.lower().endswith(SUPPORTED_EXTENSIONS)
@@ -467,104 +484,102 @@ class CaptionApp:
             return
 
         self.log(f"Found {len(image_files)} image(s).")
-        processed_count = 0
-        skipped_count = 0
-        endpoint = f"{server_url}/chat/completions"
-        times_per_image = []
 
-        for idx, filename in enumerate(image_files):
+        pending = []
+        for filename in image_files:
             if not self.is_running:
                 break
-
             image_path = os.path.join(folder_path, filename)
             base_filename, _ = os.path.splitext(filename)
             caption_path = os.path.join(folder_path, f"{base_filename}.txt")
-
             if os.path.exists(caption_path):
                 self.log(f"Skipping '{filename}' (caption exists).")
-                skipped_count += 1
                 continue
+            pending.append((filename, image_path, caption_path))
 
-            try:
-                self.log(f"Processing '{filename}'...")
-                img_start = time_module.time()
+        self.log(f"Will process {len(pending)} image(s) with {max_concurrent} worker(s).")
 
-                work_path = image_path
-                if self.var_downscale is not None and self.var_downscale.get():
-                    resized = self.resize_image(image_path, MAX_IMAGE_DIMENSION)
-                    if resized != image_path:
-                        self.log(f"  Downscaled to fit {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}")
-                    work_path = resized
+        processed_count = 0
+        error_count = 0
+        times_per_image = []
+        endpoint = f"{server_url}/chat/completions"
+        lock = threading.Lock()
+        completed = [0]
 
-                img_b64, mime_type = self.encode_image_base64(work_path)
+        def process_one(item):
+            filename, image_path, caption_path = item
+            img_start = time_module.time()
 
-                # Build messages
-                messages = []
-                if sys_instruction:
-                    messages.append({"role": "system", "content": sys_instruction})
+            work_path = image_path
+            if self.var_downscale is not None and self.var_downscale.get():
+                resized = self.resize_image(image_path, MAX_IMAGE_DIMENSION)
+                if resized != image_path:
+                    with lock:
+                        self.log(f"  Downscaled '{filename}' to {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}")
+                work_path = resized
 
-                messages.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{img_b64}"
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": prompt_text
-                        }
-                    ]
-                })
+            img_b64, mime_type = self.encode_image_base64(work_path)
 
-                payload = {
-                    "model": model_id,
-                    "messages": messages,
-                }
+            messages = []
+            if sys_instruction:
+                messages.append({"role": "system", "content": sys_instruction})
 
-                resp = requests.post(endpoint, json=payload, headers=headers, timeout=None)
-                resp.raise_for_status()
-                result = resp.json()
+            messages.append({
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{img_b64}"}},
+                    {"type": "text", "text": prompt_text}
+                ]
+            })
 
-                raw_text = result['choices'][0]['message']['content']
-                caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
+            payload = {"model": model_id, "messages": messages}
+            resp = requests.post(endpoint, json=payload, headers=headers, timeout=None)
+            resp.raise_for_status()
+            result = resp.json()
 
-                img_elapsed = time_module.time() - img_start
+            raw_text = result['choices'][0]['message']['content']
+            caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
+
+            img_elapsed = time_module.time() - img_start
+
+            if not caption:
+                return (filename, False, "Empty caption")
+
+            with open(caption_path, 'w', encoding='utf-8') as f:
+                f.write(caption)
+
+            with lock:
                 times_per_image.append(img_elapsed)
-
-                if not caption:
-                    self.log(f"Warning: Empty caption for '{filename}', skipping.")
-                    continue
-
-                with open(caption_path, 'w', encoding='utf-8') as f:
-                    f.write(caption)
-
-                self.log(f"Done: '{filename}' (took {self.format_duration(img_elapsed)})")
-
-                # Estimate remaining time
-                remaining = len(image_files) - (idx + 1)
+                completed[0] += 1
+                eta = 0
                 if times_per_image:
                     avg_time = sum(times_per_image) / len(times_per_image)
-                    eta = avg_time * remaining
-                    self.log(f"  ~{remaining} image(s) left • Est. remaining: {self.format_duration(eta)}")
+                    eta = avg_time * (len(pending) - completed[0])
+                self.log(f"Done: '{filename}' ({self.format_duration(img_elapsed)}) | {completed[0]}/{len(pending)} • Est. remaining: {self.format_duration(eta)}")
 
-                processed_count += 1
+            if work_path != image_path:
+                try:
+                    os.remove(work_path)
+                except OSError:
+                    pass
 
-                # Clean up temp resized file
-                if work_path != image_path:
-                    try:
-                        os.remove(work_path)
-                    except OSError:
-                        pass
+            return (filename, True, None)
 
-            except Exception as e:
-                self.log(f"Error on '{filename}': {e}")
+        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            futures = {executor.submit(process_one, item): item for item in pending}
+            for future in as_completed(futures):
+                if not self.is_running:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                result = future.result()
+                if result[1]:
+                    processed_count += 1
+                else:
+                    error_count += 1
+                    self.log(f"Error on '{result[0]}': {result[2]}")
 
         batch_elapsed = time_module.time() - start_time_batch
-        total_handled = processed_count + skipped_count
-        self.log(f"\nFinished! Total processed: {processed_count} | Skipped: {skipped_count} | Batch time: {self.format_duration(batch_elapsed)}")
+        self.log(f"\nFinished! Processed: {processed_count} | Errors: {error_count} | Total time: {self.format_duration(batch_elapsed)}")
         self.reset_ui()
 
     def stop_processing(self):
