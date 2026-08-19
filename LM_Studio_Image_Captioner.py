@@ -586,12 +586,14 @@ class CaptionApp:
             img_start = time_module.time()
 
             work_path = image_path
+            resized_created = False
             if self.var_downscale is not None and self.var_downscale.get():
                 resized = self.resize_image(image_path, MAX_IMAGE_DIMENSION)
                 if resized != image_path:
                     with lock:
                         self.log(f"  Downscaled '{filename}' to {MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}")
-                work_path = resized
+                    work_path = resized
+                    resized_created = True
 
             img_b64, mime_type = self.encode_image_base64(work_path)
 
@@ -625,37 +627,40 @@ class CaptionApp:
 
                 if not caption:
                     return (filename, False, "Empty caption")
+
+                with open(caption_path, 'w', encoding='utf-8') as f:
+                    f.write(caption)
+
+                with lock:
+                    times_per_image.append(img_elapsed)
+                    completed[0] += 1
+                    eta = 0
+                    if times_per_image:
+                        avg_time = sum(times_per_image) / len(times_per_image)
+                        eta = avg_time * (len(pending) - completed[0])
+                    self.log(f"Done: '{filename}' ({self.format_duration(img_elapsed)}) | {completed[0]}/{len(pending)} • Est. remaining: {self.format_duration(eta)}")
+
+                return (filename, True, None)
                     
             except requests.exceptions.ConnectionError as e:
-                return (filename, False, f"Connection error: {str(e)[:100]}")
+                error_msg = f"Connection error: {str(e)[:100]}"
             except requests.exceptions.Timeout as e:
-                return (filename, False, f"Request timeout: {str(e)[:100]}")
+                error_msg = f"Request timeout: {str(e)[:100]}"
             except requests.exceptions.HTTPError as e:
-                return (filename, False, f"API error: HTTP {e.response.status_code if e.response else 'unknown'} - {str(e)[:100]}")
+                error_msg = f"API error: HTTP {e.response.status_code if e.response else 'unknown'} - {str(e)[:100]}"
             except (KeyError, IndexError, json.JSONDecodeError) as e:
-                return (filename, False, f"Invalid API response format: {type(e).__name__}")
+                error_msg = f"Invalid API response format: {type(e).__name__}"
             except Exception as e:
-                return (filename, False, f"Unexpected error: {type(e).__name__}: {str(e)[:100]}")
-
-            with open(caption_path, 'w', encoding='utf-8') as f:
-                f.write(caption)
-
-            with lock:
-                times_per_image.append(img_elapsed)
-                completed[0] += 1
-                eta = 0
-                if times_per_image:
-                    avg_time = sum(times_per_image) / len(times_per_image)
-                    eta = avg_time * (len(pending) - completed[0])
-                self.log(f"Done: '{filename}' ({self.format_duration(img_elapsed)}) | {completed[0]}/{len(pending)} • Est. remaining: {self.format_duration(eta)}")
-
-            if work_path != image_path:
-                try:
-                    os.remove(work_path)
-                except OSError:
-                    pass
-
-            return (filename, True, None)
+                error_msg = f"Unexpected error: {type(e).__name__}: {str(e)[:100]}"
+            
+            finally:
+                if resized_created and work_path != image_path:
+                    try:
+                        os.remove(work_path)
+                    except OSError:
+                        pass
+            
+            return (filename, False, error_msg)
 
         with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             futures = {executor.submit(process_one, item): item for item in pending}
