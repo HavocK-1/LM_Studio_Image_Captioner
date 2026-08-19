@@ -545,9 +545,12 @@ class CaptionApp:
                 return
 
         try:
-            image_files = sorted(
-                f for f in os.listdir(folder_path) if f.lower().endswith(SUPPORTED_EXTENSIONS)
-            )
+            image_files = []
+            for root, dirs, files in os.walk(folder_path):
+                for f in files:
+                    if f.lower().endswith(SUPPORTED_EXTENSIONS):
+                        image_files.append(os.path.join(root, f))
+            image_files.sort()
         except Exception as e:
             self.log(f"Error reading folder: {e}")
             self.reset_ui()
@@ -561,16 +564,17 @@ class CaptionApp:
         self.log(f"Found {len(image_files)} image(s).")
 
         pending = []
-        for filename in image_files:
+        for full_path in image_files:
             if not self.is_running:
                 break
-            image_path = os.path.join(folder_path, filename)
+            filename = os.path.basename(full_path)
+            rel_path = os.path.relpath(full_path, folder_path)
             base_filename, _ = os.path.splitext(filename)
-            caption_path = os.path.join(folder_path, f"{base_filename}.txt")
+            caption_path = os.path.join(os.path.dirname(full_path), f"{base_filename}.txt")
             if os.path.exists(caption_path):
-                self.log(f"Skipping '{filename}' (caption exists).")
+                self.log(f"Skipping '{rel_path}' (caption exists).")
                 continue
-            pending.append((filename, image_path, caption_path))
+            pending.append((filename, full_path, caption_path))
 
         self.log(f"Will process {len(pending)} image(s) with {max_concurrent} worker(s).")
 
