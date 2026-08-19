@@ -1,0 +1,9 @@
+{
+    "server_url": "https://nano-gpt.com/api/v1",
+    "api_key": "sk-nano-5b96896c-81ff-4803-b10e-09388b6612be",
+    "model_name": "dots-studio/dots-3-note-preview",
+    "folder_path": "D:/Homework/idk/Ai",
+    "system_instruction": "You are image captioning expert. Describe user's picture according to requested format and instructions.",
+    "prompt": "# Captioning format:\nMake a caption for given image with natural text. Use 2 to 5 paragraphs. Make your description long and vivid, mentioning all the details. Do not mention moood, vibe or tone.\nYou must cite all  text present on the image.\n\n# Characters on picture:\nAvoid to guess names for characters.",
+    "max_concurrent": 1
+}
