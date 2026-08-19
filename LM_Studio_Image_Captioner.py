@@ -9,6 +9,7 @@ import base64
 import re
 import requests
 import time
+import random
 try:
     from PIL import Image
 except ImportError:
@@ -23,6 +24,12 @@ CONFIG_FILE = os.path.join(_APP_DIR, "caption_config.json")
 LMSTUDIO_DEFAULT_URL = "http://localhost:1234/v1"
 SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp')
 MAX_IMAGE_DIMENSION = 1024
+
+# --- API CONFIGURATION ---
+DEFAULT_TIMEOUT = 120  # seconds
+DEFAULT_MAX_RETRIES = 5
+RETRY_BACKOFF_BASE = 2  # Exponential backoff: 2, 4, 8, 16, 32 seconds
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}  # Server errors and rate limiting
 
 # --- THEMES ---
 THEME_DARK = {
@@ -346,6 +353,59 @@ class CaptionApp:
         except Exception as e:
             self.log(f"Could not save config: {e}")
 
+    # --- API RETRY LOGIC ---
+    @staticmethod
+    def make_api_request_with_retry(endpoint, payload, headers, timeout=DEFAULT_TIMEOUT, max_retries=DEFAULT_MAX_RETRIES):
+        """Make an API request with retry logic and exponential backoff.
+        
+        Handles connection errors, timeouts, and retryable HTTP status codes.
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                resp = requests.post(endpoint, json=payload, headers=headers, timeout=timeout)
+                
+                # If successful, return the response
+                if resp.status_code < 400:
+                    return resp
+                
+                # Check if this is a retryable error
+                if resp.status_code in RETRYABLE_STATUS_CODES:
+                    last_exception = requests.exceptions.HTTPError(
+                        f"HTTP {resp.status_code}: {resp.text[:200]}", 
+                        response=resp
+                    )
+                    
+                    if attempt < max_retries:
+                        backoff = RETRY_BACKOFF_BASE ** attempt + random.uniform(0, 1)
+                        time.sleep(backoff)
+                        continue
+                    else:
+                        # Max retries reached, return the last response
+                        return resp
+                else:
+                    # Non-retryable error, raise immediately
+                    resp.raise_for_status()
+                    
+            except (requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                last_exception = e
+                
+                if attempt < max_retries:
+                    backoff = RETRY_BACKOFF_BASE ** attempt + random.uniform(0, 1)
+                    time.sleep(backoff)
+                    continue
+                else:
+                    raise
+        
+        # If we get here, we've exhausted retries and have a response to return
+        # (this shouldn't happen but just in case)
+        if last_exception:
+            raise last_exception
+        return resp
+
     def save_prompts(self):
         """Save current prompts and settings to config."""
         server_url = self.entry_url.get().strip() or LMSTUDIO_DEFAULT_URL
@@ -393,8 +453,8 @@ class CaptionApp:
     # --- STRIP THINKING TAGS ---
     @staticmethod
     def strip_thinking(text):
-        """Remove  blocks from thinking-model output."""
-        return re.sub(r'', '', text, flags=re.DOTALL).strip()
+        """Remove <think> blocks from thinking-model output."""
+        return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
     # --- TIME FORMATTING HELPER ---
     @staticmethod
@@ -458,11 +518,26 @@ class CaptionApp:
             self.log(f"Using explicitly set model: {model_id}")
         else:
             try:
-                r = requests.get(f"{server_url}/models", headers=headers, timeout=5)
+                r = requests.get(f"{server_url}/models", headers=headers, timeout=10)
                 r.raise_for_status()
                 models_data = r.json()
                 model_id = models_data['data'][0]['id'] if models_data.get('data') else "local-model"
                 self.log(f"Connected. Model: {model_id}")
+            except requests.exceptions.ConnectionError as e:
+                self.log(f"Cannot connect to server at {server_url}: {e}")
+                self.log("Tip: Check if the server is running and the URL is correct.")
+                self.reset_ui()
+                return
+            except requests.exceptions.Timeout as e:
+                self.log(f"Server timeout while detecting model: {e}")
+                self.log("Tip: Server may be overloaded. Set the model name manually.")
+                self.reset_ui()
+                return
+            except requests.exceptions.HTTPError as e:
+                self.log(f"HTTP error while detecting model: {e}")
+                self.log("Tip: Set the model name manually if this is an OpenAI-compatible endpoint.")
+                self.reset_ui()
+                return
             except Exception as e:
                 self.log(f"Cannot reach server or auto-detect model: {e}")
                 self.log("Tip: Set the model name manually if this is an OpenAI-compatible endpoint.")
@@ -533,17 +608,34 @@ class CaptionApp:
             })
 
             payload = {"model": model_id, "messages": messages}
-            resp = requests.post(endpoint, json=payload, headers=headers, timeout=None)
-            resp.raise_for_status()
-            result = resp.json()
+            
+            try:
+                resp = self.make_api_request_with_retry(
+                    endpoint, payload, headers, 
+                    timeout=DEFAULT_TIMEOUT,
+                    max_retries=DEFAULT_MAX_RETRIES
+                )
+                resp.raise_for_status()
+                result = resp.json()
 
-            raw_text = result['choices'][0]['message']['content']
-            caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
+                raw_text = result['choices'][0]['message']['content']
+                caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
 
-            img_elapsed = time_module.time() - img_start
+                img_elapsed = time_module.time() - img_start
 
-            if not caption:
-                return (filename, False, "Empty caption")
+                if not caption:
+                    return (filename, False, "Empty caption")
+                    
+            except requests.exceptions.ConnectionError as e:
+                return (filename, False, f"Connection error: {str(e)[:100]}")
+            except requests.exceptions.Timeout as e:
+                return (filename, False, f"Request timeout: {str(e)[:100]}")
+            except requests.exceptions.HTTPError as e:
+                return (filename, False, f"API error: HTTP {e.response.status_code if e.response else 'unknown'} - {str(e)[:100]}")
+            except (KeyError, IndexError, json.JSONDecodeError) as e:
+                return (filename, False, f"Invalid API response format: {type(e).__name__}")
+            except Exception as e:
+                return (filename, False, f"Unexpected error: {type(e).__name__}: {str(e)[:100]}")
 
             with open(caption_path, 'w', encoding='utf-8') as f:
                 f.write(caption)
