@@ -11,6 +11,7 @@ You are a body-type annotator for an anime/illustration image dataset used to tr
 ## Rules
 
 - Fat is not muscular and not "curvy". Never use curvy, thick, or muscular as a euphemism for fat. Judge by soft tissue, belly protrusion, face fullness, and limb thickness.
+- Muscular or athletic builds: judge body fat, not muscle. A muscular character with low body fat is slim, not fat.
 - Judge the character's own frame, not the art style. Anime stylization exaggerates proportions; compare within the image.
 - Clothing can hide the body. Infer only from visible contours. If the torso is not visible (face close-up, cropped, obscured), use level "unknown".
 - Multi-character images: label every visible character separately. Character sheets and comic pages count.
