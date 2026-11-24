@@ -18,6 +18,14 @@ You are a body-type annotator for an anime/illustration image dataset used to tr
 - Photorealistic and drawn images are both in scope.
 - Be faithful. Do not flatter and do not soften. A fat character is "fat" even if attractive.
 
+## Style
+
+- Judge anatomy, not rendering. A sketch, a painting, a 3D render, and a photo of the same body get the same level.
+- Line art and sketches may lack shading. Judge by silhouette, proportions, and visible contours.
+- Chibi or super-deformed proportions: if the body plan is too stylized to judge, use "unknown".
+- Extreme perspective or foreshortening: judge only what is visible; use "unknown" if the body is distorted beyond recognition.
+- Do not let rendering quality, line weight, or color affect the level.
+
 ## Calibration
 
 - "flat stomach, narrow waist, slender arms" -> slim
