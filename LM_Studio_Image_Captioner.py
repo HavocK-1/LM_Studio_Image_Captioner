@@ -21,12 +21,12 @@ if getattr(sys, 'frozen', False):
 else:
     _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(_APP_DIR, "caption_config.json")
-LMSTUDIO_DEFAULT_URL = "http://localhost:1234/v1"
+LMSTUDIO_DEFAULT_URL = "http://localhost:5001/v1"
 SUPPORTED_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp')
 MAX_IMAGE_DIMENSION = 1024
 
 # --- API CONFIGURATION ---
-DEFAULT_TIMEOUT = 120  # seconds
+DEFAULT_TIMEOUT = 12000  # seconds
 DEFAULT_MAX_RETRIES = 5
 RETRY_BACKOFF_BASE = 2  # Exponential backoff: 2, 4, 8, 16, 32 seconds
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}  # Server errors and rate limiting
@@ -456,6 +456,19 @@ class CaptionApp:
         """Remove <think> blocks from thinking-model output."""
         return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
+    # --- JSON EXTRACTION ---
+    @staticmethod
+    def extract_json(text):
+        """Strip markdown fences and validate the JSON object."""
+        text = text.strip()
+        if text.startswith('```'):
+            text = re.sub(r'^```[a-zA-Z]*\s*', '', text)
+            text = re.sub(r'\s*```$', '', text)
+        try:
+            return json.dumps(json.loads(text), ensure_ascii=False)
+        except json.JSONDecodeError:
+            return None
+
     # --- TIME FORMATTING HELPER ---
     @staticmethod
     def format_duration(seconds):
@@ -570,7 +583,7 @@ class CaptionApp:
             filename = os.path.basename(full_path)
             rel_path = os.path.relpath(full_path, folder_path)
             base_filename, _ = os.path.splitext(filename)
-            caption_path = os.path.join(os.path.dirname(full_path), f"{base_filename}.txt")
+            caption_path = os.path.join(os.path.dirname(full_path), f"{base_filename}.json")
             if os.path.exists(caption_path):
                 self.log(f"Skipping '{rel_path}' (caption exists).")
                 continue
@@ -613,7 +626,9 @@ class CaptionApp:
                 ]
             })
 
-            payload = {"model": model_id, "messages": messages}
+            payload = {"model": model_id, "messages": messages,
+                       "temperature": 0,
+                       "response_format": {"type": "json_object"}}
             
             try:
                 resp = self.make_api_request_with_retry(
@@ -625,12 +640,12 @@ class CaptionApp:
                 result = resp.json()
 
                 raw_text = result['choices'][0]['message']['content']
-                caption = self.strip_thinking(raw_text).replace('\n', ' ').strip()
+                caption = self.extract_json(self.strip_thinking(raw_text))
 
                 img_elapsed = time_module.time() - img_start
 
                 if not caption:
-                    return (filename, False, "Empty caption")
+                    return (filename, False, "Invalid JSON")
 
                 with open(caption_path, 'w', encoding='utf-8') as f:
                     f.write(caption)
