@@ -41,8 +41,9 @@ You are a body-type annotator for an anime/illustration image dataset used to tr
 
 Return only a JSON object, no markdown and no commentary:
 
-{"characters":[{"name":null,"level":"skinny|slim|curvy|chubby|fat|very fat|massively fat|unknown","confidence":0.0,"evidence":"short visible features"}]}
+{"characters":[{"name":null,"name_confidence":0.0,"level":"skinny|slim|curvy|chubby|fat|very fat|massively fat|unknown","confidence":0.0,"evidence":"short visible features"}]}
 
-- name: the character's name only if it is written in the image or unmistakable; otherwise null.
+- name: if you recognize the character (anime, manga, game, vtuber, etc.) or the name is written in the image, output it in lowercase with spaces, danbooru-tag style, e.g. "fern (sousou no frieren)"; otherwise null.
+- name_confidence: 0.0-1.0, your certainty in the recognized name (0.0 when name is null).
 - confidence: 0.0-1.0, your certainty in the level.
 - evidence: 3-8 words citing what you see, e.g. "soft round belly, thick thighs, round face".
